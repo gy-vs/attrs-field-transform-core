@@ -1,0 +1,3 @@
+The field transformer now receives fields whose default ``alias`` has already been resolved (private-name adjustment applied), together with a new ``Attribute.alias_type`` that says whether the alias was generated (``attrs.AliasType.DEFAULT``) or explicitly provided (``attrs.AliasType.EXPLICIT``).
+When a transformer renames a field via ``Attribute.evolve(name=...)``, a generated alias follows the new name while an explicit alias is preserved; fields added by a transformer without an alias get the default alias after the transformer finishes.
+The new state is kept consistent across copying, pickling, ``attrs.fields()`` and ``attrs.fields_dict()``.

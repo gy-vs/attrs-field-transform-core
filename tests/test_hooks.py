@@ -178,8 +178,160 @@ class TestTransformHook:
             "eq=True, eq_key=None, order=True, order_key=None, "
             "hash=None, init=True, "
             "metadata=mappingproxy({'field_order': 1}), type='int', converter=None, "
-            "kw_only=False, inherited=False, on_setattr=None, alias=None)",
+            "kw_only=False, inherited=False, on_setattr=None, alias='x', "
+            "alias_type=<AliasType.DEFAULT: 'default'>)",
         ) == e.value.args
+
+    def test_hook_sees_resolved_default_alias(self):
+        """
+        The attributes passed to the field_transformer already carry the
+        resolved default alias and an alias_type distinguishing it from
+        explicit aliases.
+        """
+        seen = []
+
+        def hook(cls, attribs):
+            seen[:] = [(a.name, a.alias, a.alias_type) for a in attribs]
+            return attribs
+
+        @attr.s(field_transformer=hook)
+        class C:
+            public = attr.ib()
+            _private = attr.ib()
+            explicit = attr.ib(alias="explicit_name")
+            _same = attr.ib(alias="_same")
+
+        assert seen == [
+            ("public", "public", attr.AliasType.DEFAULT),
+            ("_private", "private", attr.AliasType.DEFAULT),
+            ("explicit", "explicit_name", attr.AliasType.EXPLICIT),
+            ("_same", "_same", attr.AliasType.EXPLICIT),
+        ]
+
+    def test_hook_rename_auto_alias_follows(self):
+        """
+        Renaming a field with a default alias via evolve() makes the alias
+        follow the new name.
+        """
+
+        def hook(cls, attribs):
+            return [
+                a.evolve(name="_renamed") if a.name == "_private" else a
+                for a in attribs
+            ]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            _private = attr.ib()
+
+        a = attr.fields(C)[0]
+        assert a.name == "_renamed"
+        assert a.alias == "renamed"
+        assert a.alias_type is attr.AliasType.DEFAULT
+
+        assert C(renamed=1)._renamed == 1
+
+    def test_hook_rename_keeps_explicit_alias(self):
+        """
+        Renaming a field whose alias was explicitly provided leaves the alias
+        pointing at the explicit name instead of the old/new field name.
+        """
+
+        def hook(cls, attribs):
+            return [
+                a.evolve(name="_new_name") if a.name == "_old" else a
+                for a in attribs
+            ]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            _old = attr.ib(alias="kept_alias")
+
+        a = attr.fields(C)[0]
+        assert a.name == "_new_name"
+        assert a.alias == "kept_alias"
+        assert a.alias_type is attr.AliasType.EXPLICIT
+
+        assert C(kept_alias=1)._new_name == 1
+
+    def test_hook_add_field_gets_default_alias(self):
+        """
+        A brand-new field added by the transformer without an alias gets the
+        default private-name alias after the transformer is done.
+        """
+
+        def hook(cls, attribs):
+            added = attribs[0].evolve(name="_added", alias=None)
+            return [*attribs, added]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            x = attr.ib()
+
+        fields = attr.fields(C)
+        assert [a.name for a in fields] == ["x", "_added"]
+        added = fields[1]
+        assert added.alias == "added"
+        assert added.alias_type is attr.AliasType.DEFAULT
+
+        assert C(x=1, added=2)._added == 2
+
+    def test_hook_add_handbuilt_field_gets_default_alias(self):
+        """
+        Even a hand-instantiated Attribute with alias=None added by the
+        transformer receives a resolved alias and alias_type.
+        """
+
+        def hook(cls, attribs):
+            new = attr.Attribute(
+                name="_new",
+                default=7,
+                validator=None,
+                repr=True,
+                cmp=None,
+                hash=None,
+                init=True,
+                inherited=False,
+            )
+            return [*attribs, new]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            x = attr.ib()
+
+        added = attr.fields(C)[1]
+        assert added.alias == "new"
+        assert added.alias_type is attr.AliasType.DEFAULT
+        assert C(1)._new == 7
+
+    def test_hook_alias_type_consistent_in_fields(self):
+        """
+        The alias_type recorded for each field is consistent with the
+        generated __init__ signature.
+        """
+        import inspect
+
+        def hook(cls, attribs):
+            def resolve(a):
+                if a.alias_type is attr.AliasType.EXPLICIT:
+                    return a
+                return a.evolve(alias=a.name)
+
+            return [resolve(a) for a in attribs]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            _private = attr.ib()
+            explicit = attr.ib(alias="explicit_name")
+
+        params = list(inspect.signature(C.__init__).parameters)[1:]
+        assert params == ["_private", "explicit_name"]
+
+        fields = attr.fields(C)
+        assert fields[0].alias == "_private"
+        assert fields[0].alias_type is attr.AliasType.EXPLICIT
+        assert fields[1].alias == "explicit_name"
+        assert fields[1].alias_type is attr.AliasType.EXPLICIT
 
     def test_hook_with_inheritance(self):
         """

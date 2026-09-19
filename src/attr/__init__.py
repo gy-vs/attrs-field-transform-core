@@ -13,6 +13,7 @@ from ._config import get_run_validators, set_run_validators
 from ._funcs import asdict, assoc, astuple, has, resolve_types
 from ._make import (
     NOTHING,
+    AliasType,
     Attribute,
     Converter,
     Factory,
@@ -42,6 +43,7 @@ NothingType = Literal[_Nothing.NOTHING]
 
 __all__ = [
     "NOTHING",
+    "AliasType",
     "Attribute",
     "AttrsInstance",
     "Converter",

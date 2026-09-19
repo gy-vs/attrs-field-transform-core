@@ -480,13 +480,18 @@ def _transform_attrs(
         if had_default is False and a.default is not NOTHING:
             had_default = True
 
-    # Resolve default field alias after executing field_transformer.
-    # This allows field_transformer to differentiate between explicit vs
-    # default aliases and supply their own defaults.
+    # Fields coming from the class body have their aliases resolved already,
+    # but a field_transformer may add brand-new Attributes (e.g. built by
+    # hand or via ``Attribute.evolve(name=..., alias=None)``).  Resolve their
+    # aliases and make sure alias_type never disagrees with alias.
     for a in attrs:
+        bound_setattr = _OBJ_SETATTR.__get__(a)
         if not a.alias:
-            # Evolve is very slow, so we hold our nose and do it dirty.
-            _OBJ_SETATTR.__get__(a)("alias", _default_init_alias_for(a.name))
+            bound_setattr("alias", _default_init_alias_for(a.name))
+            if a.alias_type is None:
+                bound_setattr("alias_type", AliasType.DEFAULT)
+        elif a.alias_type is None:
+            bound_setattr("alias_type", AliasType.EXPLICIT)
 
     # Create AttrsClass *after* applying the field_transformer since it may
     # add or remove attributes!
@@ -2402,6 +2407,28 @@ def _attrs_to_init_script(
     )
 
 
+class AliasType(enum.Enum):
+    """
+    Describes how an :class:`Attribute`'s *alias* was determined.
+
+    Attributes:
+        DEFAULT:
+            The alias was -- or will be -- generated from the field name via
+            :func:`_default_init_alias_for` (private-name adjustment).
+
+        EXPLICIT:
+            The alias was explicitly provided by the user, either through
+            ``attr.ib(alias=...)`` or by a field transformer.
+
+    .. versionadded:: 26.1.0
+    """
+
+    DEFAULT = "default"
+    """The alias is derived from the field name."""
+    EXPLICIT = "explicit"
+    """The alias was explicitly supplied by the user."""
+
+
 def _default_init_alias_for(name: str) -> str:
     """
     The default __init__ parameter name for a field.
@@ -2411,6 +2438,19 @@ def _default_init_alias_for(name: str) -> str:
     """
 
     return name.lstrip("_")
+
+
+def _resolve_alias(name: str, alias: str | None) -> tuple[str, AliasType]:
+    """
+    Return the resolved *alias* for *name* together with its `AliasType`.
+
+    A truthy alias means it was explicitly provided; otherwise the default
+    private-name-adjusted alias is computed.
+    """
+    if alias:
+        return alias, AliasType.EXPLICIT
+
+    return _default_init_alias_for(name), AliasType.DEFAULT
 
 
 class Attribute:
@@ -2427,6 +2467,9 @@ class Attribute:
     - ``name`` (`str`): The name of the attribute.
     - ``alias`` (`str`): The __init__ parameter name of the attribute, after
       any explicit overrides and default private-attribute-name handling.
+    - ``alias_type`` (`AliasType`): Whether *alias* was generated from the
+      field name (`AliasType.DEFAULT`) or explicitly provided by the user
+      (`AliasType.EXPLICIT`).
     - ``inherited`` (`bool`): Whether or not that attribute has been inherited
       from a base class.
     - ``eq_key`` and ``order_key`` (`typing.Callable` or `None`): The
@@ -2444,6 +2487,9 @@ class Attribute:
       them.
     - The ``alias`` property exposes the __init__ parameter name of the field,
       with any overrides and default private-attribute handling applied.
+    - The ``alias_type`` property reports whether the alias was generated
+      (`AliasType.DEFAULT`) or explicitly provided (`AliasType.EXPLICIT`), so
+      field transformers can tell both cases apart.
 
 
     .. versionadded:: 20.1.0 *inherited*
@@ -2452,6 +2498,7 @@ class Attribute:
         equality checks and hashing anymore.
     .. versionadded:: 21.1.0 *eq_key* and *order_key*
     .. versionadded:: 22.2.0 *alias*
+    .. versionadded:: 26.1.0 *alias_type*
 
     For the full version history of the fields, see `attr.ib`.
     """
@@ -2476,6 +2523,7 @@ class Attribute:
         "inherited",
         "on_setattr",
         "alias",
+        "alias_type",
     )
 
     def __init__(
@@ -2498,6 +2546,7 @@ class Attribute:
         order_key=None,
         on_setattr=None,
         alias=None,
+        alias_type=None,
     ):
         eq, eq_key, order, order_key = _determine_attrib_eq_order(
             cmp, eq_key or eq, order_key or order, True
@@ -2532,6 +2581,7 @@ class Attribute:
         bound_setattr("inherited", inherited)
         bound_setattr("on_setattr", on_setattr)
         bound_setattr("alias", alias)
+        bound_setattr("alias_type", alias_type)
 
     def __setattr__(self, name, value):
         raise FrozenInstanceError
@@ -2548,6 +2598,12 @@ class Attribute:
         elif ca.type is not None:
             msg = f"Type annotation and type argument cannot both be present for '{name}'."
             raise ValueError(msg)
+
+        # Resolve the default alias already here, so that field transformers
+        # see the same alias that __init__ generation uses and can tell
+        # explicit aliases apart from generated ones.
+        alias, alias_type = _resolve_alias(name, ca.alias)
+
         return cls(
             name,
             ca._default,
@@ -2566,7 +2622,8 @@ class Attribute:
             ca.order,
             ca.order_key,
             ca.on_setattr,
-            ca.alias,
+            alias,
+            alias_type,
         )
 
     # Don't use attrs.evolve since fields(Attribute) doesn't work
@@ -2579,11 +2636,33 @@ class Attribute:
 
         It is mainly meant to be used for `transform-fields`.
 
+        Renaming a field (``name=...``) updates a default alias to match the
+        new name; an explicit alias is left untouched.  Passing a new
+        ``alias=...`` always makes it explicit; passing ``alias=None`` makes
+        the alias default-derived again.  The automatic bookkeeping can be
+        overridden explicitly via ``alias_type=...``.
+
         .. versionadded:: 20.3.0
+        .. versionchanged:: 26.1.0
+           *alias* and *alias_type* are kept in sync when renaming fields.
         """
         new = copy.copy(self)
 
         new._setattrs(changes.items())
+
+        # Keep alias and alias_type consistent, unless the caller managed
+        # both explicitly.
+        if "alias_type" not in changes:
+            bound_setattr = _OBJ_SETATTR.__get__(new)
+            if "alias" in changes:
+                # A truthy alias is explicit; alias=None (or another falsey
+                # value) falls back to the default derived from the name.
+                alias, alias_type = _resolve_alias(new.name, new.alias)
+                bound_setattr("alias", alias)
+                bound_setattr("alias_type", alias_type)
+            elif "name" in changes and new.alias_type is AliasType.DEFAULT:
+                # Auto-generated aliases follow field renames.
+                bound_setattr("alias", _default_init_alias_for(new.name))
 
         return new
 
@@ -2632,6 +2711,7 @@ _a = [
         init=True,
         inherited=False,
         alias=_default_init_alias_for(name),
+        alias_type=AliasType.DEFAULT,
     )
     for name in Attribute.__slots__
 ]
@@ -2677,6 +2757,7 @@ class _CountingAttr:
             Attribute(
                 name=name,
                 alias=_default_init_alias_for(name),
+                alias_type=AliasType.DEFAULT,
                 default=NOTHING,
                 validator=None,
                 repr=True,
@@ -2706,6 +2787,7 @@ class _CountingAttr:
         Attribute(
             name="metadata",
             alias="metadata",
+            alias_type=AliasType.DEFAULT,
             default=None,
             validator=None,
             repr=True,
@@ -2971,6 +3053,7 @@ _cas = [
         init=True,
         inherited=False,
         alias=_default_init_alias_for(name),
+        alias_type=AliasType.DEFAULT,
     )
     for name in ClassProps.__slots__
 ]
@@ -3029,6 +3112,8 @@ _f = [
         hash=True,
         init=True,
         inherited=False,
+        alias=name,
+        alias_type=AliasType.DEFAULT,
     )
     for name in Factory.__slots__
 ]
@@ -3146,6 +3231,8 @@ _f = [
         hash=True,
         init=True,
         inherited=False,
+        alias=name,
+        alias_type=AliasType.DEFAULT,
     )
     for name in ("converter", "takes_self", "takes_field")
 ]

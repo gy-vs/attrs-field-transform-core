@@ -14,7 +14,7 @@ So it is fairly simple to build your own decorators on top of *attrs*:
 ... @define
 ... class C:
 ...     a: int
-(Attribute(name='a', default=NOTHING, validator=None, repr=True, eq=True, eq_key=None, order=True, order_key=None, hash=None, init=True, metadata=mappingproxy({}), type=<class 'int'>, converter=None, kw_only=False, inherited=False, on_setattr=None, alias='a'),)
+(Attribute(name='a', default=NOTHING, validator=None, repr=True, eq=True, eq_key=None, order=True, order_key=None, hash=None, init=True, metadata=mappingproxy({}), type=<class 'int'>, converter=None, kw_only=False, inherited=False, on_setattr=None, alias='a', alias_type=<AliasType.DEFAULT: 'default'>),)
 ```
 
 :::{warning}
@@ -248,13 +248,14 @@ Data(a=3, b='spam', c=datetime.datetime(2020, 5, 4, 13, 37))
 ```
 
 Or, perhaps you would prefer to generate dataclass-compatible `__init__` signatures via a default field *alias*.
-Note, *field_transformer* operates on {class}`attrs.Attribute` instances before the default private-attribute handling is applied so explicit user-provided aliases can be detected.
+*field_transformer* operates on {class}`attrs.Attribute` instances whose default alias is already resolved, but you can tell it apart from explicit aliases through the field's {class}`~attrs.AliasType`:
 
 ```{doctest}
+>>> from attrs import AliasType
 >>> def dataclass_names(cls, fields):
 ...     return [
 ...         field.evolve(alias=field.name)
-...         if not field.alias
+...         if field.alias_type is AliasType.DEFAULT
 ...         else field
 ...         for field in fields
 ...     ]

@@ -121,6 +121,10 @@ class Converter(Generic[In, Out]):
         takes_self: Literal[True],
     ) -> None: ...
 
+class AliasType(enum.Enum):
+    DEFAULT: str
+    EXPLICIT: str
+
 class Attribute(Generic[_T]):
     name: str
     default: _T | None
@@ -136,7 +140,8 @@ class Attribute(Generic[_T]):
     type: type[_T] | None
     kw_only: bool
     on_setattr: _OnSetAttrType
-    alias: str | None
+    alias: str
+    alias_type: AliasType
 
     def evolve(self, **changes: Any) -> "Attribute[Any]": ...
 

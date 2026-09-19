@@ -2,6 +2,7 @@
 
 from attr import (
     NOTHING,
+    AliasType,
     Attribute,
     AttrsInstance,
     Converter,
@@ -30,6 +31,7 @@ from . import converters, exceptions, filters, setters, validators
 
 __all__ = [
     "NOTHING",
+    "AliasType",
     "Attribute",
     "AttrsInstance",
     "ClassProps",

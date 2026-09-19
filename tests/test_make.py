@@ -9,6 +9,7 @@ import functools
 import gc
 import inspect
 import itertools
+import pickle
 import sys
 import unicodedata
 
@@ -243,7 +244,8 @@ class TestTransformAttrs:
             "eq=True, eq_key=None, order=True, order_key=None, "
             "hash=None, init=True, "
             "metadata=mappingproxy({}), type=None, converter=None, "
-            "kw_only=False, inherited=False, on_setattr=None, alias=None)",
+            "kw_only=False, inherited=False, on_setattr=None, alias='y', "
+            "alias_type=<AliasType.DEFAULT: 'default'>)",
         ) == e.value.args
 
     def test_kw_only(self):
@@ -2384,6 +2386,160 @@ class TestInitAlias:
             EvolveCase__mangled=4,
             dunder__=5,
         ) == EvolveCase(1, 4, 5)
+
+    def test_alias_type_private_name(self):
+        """
+        Fields without an explicit alias get the default private-name alias
+        and are marked as AliasType.DEFAULT before a field_transformer runs.
+        """
+
+        seen = []
+
+        def hook(cls, fields):
+            seen.extend((a.name, a.alias, a.alias_type) for a in fields)
+            return fields
+
+        @attr.s(field_transformer=hook)
+        class C:
+            public = attr.ib()
+            _private = attr.ib()
+            __dunder__ = attr.ib()
+
+        assert seen == [
+            ("public", "public", attr.AliasType.DEFAULT),
+            ("_private", "private", attr.AliasType.DEFAULT),
+            ("__dunder__", "dunder__", attr.AliasType.DEFAULT),
+        ]
+
+        fields = attr.fields(C)
+        assert fields.public.alias == "public"
+        assert fields.public.alias_type is attr.AliasType.DEFAULT
+        assert fields._private.alias == "private"
+        assert fields._private.alias_type is attr.AliasType.DEFAULT
+        assert fields.__dunder__.alias == "dunder__"
+        assert fields.__dunder__.alias_type is attr.AliasType.DEFAULT
+
+    def test_alias_type_explicit_same_value(self):
+        """
+        An explicit alias equal to the default-derived alias is still marked
+        explicit, so it cannot be confused with the auto alias.
+        """
+
+        seen = []
+
+        def hook(cls, fields):
+            seen.extend((a.name, a.alias, a.alias_type) for a in fields)
+            return fields
+
+        @attr.s(field_transformer=hook)
+        class C:
+            public = attr.ib()
+            explicit_same = attr.ib(alias="explicit_same")
+            _explicit_private = attr.ib(alias="explicit_private")
+
+        assert seen == [
+            ("public", "public", attr.AliasType.DEFAULT),
+            (
+                "explicit_same",
+                "explicit_same",
+                attr.AliasType.EXPLICIT,
+            ),
+            (
+                "_explicit_private",
+                "explicit_private",
+                attr.AliasType.EXPLICIT,
+            ),
+        ]
+
+        for a in attr.fields(C):
+            assert (a.alias_type is attr.AliasType.EXPLICIT) == (
+                a.name != "public"
+            )
+
+    def test_alias_type_survives_copy_and_pickle(self):
+        """
+        alias and alias_type are preserved by copying, pickling, and through
+        fields()/fields_dict().
+        """
+
+        @attr.s
+        class C:
+            _auto = attr.ib()
+            _explicit = attr.ib(alias="kept")
+
+        for getter in (lambda: attr.fields(C), lambda: attr.fields_dict(C)):
+            fields = getter()
+            auto = fields[0] if isinstance(fields, tuple) else fields["_auto"]
+            explicit = (
+                fields[1] if isinstance(fields, tuple) else fields["_explicit"]
+            )
+
+            for a, alias, atype in (
+                (auto, "auto", attr.AliasType.DEFAULT),
+                (explicit, "kept", attr.AliasType.EXPLICIT),
+            ):
+                assert a.alias == alias
+                assert a.alias_type is atype
+
+                copied = copy.copy(a)
+                assert copied.alias == alias
+                assert copied.alias_type is atype
+                assert copied == a
+
+                pickled = pickle.loads(pickle.dumps(a))
+                assert pickled.alias == alias
+                assert pickled.alias_type is atype
+                assert pickled == a
+
+    def test_evolve_rename_updates_default_alias(self):
+        """
+        Renaming a field with a default alias via evolve() moves the alias
+        along with the new name.
+        """
+
+        a = simple_attr("_private")
+        assert a.alias == "private"
+        assert a.alias_type is attr.AliasType.DEFAULT
+
+        renamed = a.evolve(name="_renamed")
+        assert renamed.name == "_renamed"
+        assert renamed.alias == "renamed"
+        assert renamed.alias_type is attr.AliasType.DEFAULT
+
+        # The original is untouched.
+        assert a.name == "_private"
+        assert a.alias == "private"
+
+    def test_evolve_rename_keeps_explicit_alias(self):
+        """
+        Renaming a field that has an explicit alias via evolve() leaves the
+        alias untouched and keeps it explicit.
+        """
+
+        @attr.s
+        class C:
+            _x = attr.ib(alias="custom")
+
+        a = attr.fields(C)._x
+        renamed = a.evolve(name="_y")
+        assert renamed.name == "_y"
+        assert renamed.alias == "custom"
+        assert renamed.alias_type is attr.AliasType.EXPLICIT
+
+    def test_evolve_alias_changes_type(self):
+        """
+        Setting alias explicitly marks it explicit; resetting it to None makes
+        it default-derived again.
+        """
+
+        a = simple_attr("x")
+        explicit = a.evolve(alias="wow")
+        assert explicit.alias == "wow"
+        assert explicit.alias_type is attr.AliasType.EXPLICIT
+
+        reset = explicit.evolve(alias=None, name="_back")
+        assert reset.alias == "back"
+        assert reset.alias_type is attr.AliasType.DEFAULT
 
 
 class TestMakeOrder:

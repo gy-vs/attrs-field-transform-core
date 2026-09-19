@@ -18,7 +18,7 @@ from hypothesis.strategies import booleans
 import attr
 
 from attr._compat import PY_3_13_PLUS
-from attr._make import NOTHING, Attribute
+from attr._make import NOTHING, AliasType, Attribute
 from attr.exceptions import FrozenInstanceError
 
 
@@ -121,6 +121,7 @@ class TestFunctional:
             Attribute(
                 name="x",
                 alias="x",
+                alias_type=AliasType.DEFAULT,
                 default=foo,
                 validator=None,
                 repr=True,
@@ -134,6 +135,7 @@ class TestFunctional:
             Attribute(
                 name="y",
                 alias="y",
+                alias_type=AliasType.DEFAULT,
                 default=attr.Factory(list),
                 validator=None,
                 repr=True,
@@ -192,6 +194,7 @@ class TestFunctional:
             Attribute(
                 name="a",
                 alias="a",
+                alias_type=AliasType.DEFAULT,
                 default=NOTHING,
                 validator=None,
                 repr=True,
@@ -205,6 +208,7 @@ class TestFunctional:
             Attribute(
                 name="b",
                 alias="b",
+                alias_type=AliasType.DEFAULT,
                 default=NOTHING,
                 validator=None,
                 repr=True,
