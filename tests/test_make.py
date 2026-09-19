@@ -9,6 +9,7 @@ import functools
 import gc
 import inspect
 import itertools
+import pickle
 import sys
 import unicodedata
 
@@ -243,7 +244,7 @@ class TestTransformAttrs:
             "eq=True, eq_key=None, order=True, order_key=None, "
             "hash=None, init=True, "
             "metadata=mappingproxy({}), type=None, converter=None, "
-            "kw_only=False, inherited=False, on_setattr=None, alias=None)",
+            "kw_only=False, inherited=False, on_setattr=None, alias='y')",
         ) == e.value.args
 
     def test_kw_only(self):
@@ -2384,6 +2385,157 @@ class TestInitAlias:
             EvolveCase__mangled=4,
             dunder__=5,
         ) == EvolveCase(1, 4, 5)
+
+    def test_alias_is_default_on_fields(self):
+        """
+        alias_is_default records whether an alias has been auto-generated
+        from the field name (with private-name handling) or explicitly
+        provided -- even if the explicit alias is equal to the default.
+
+        The state is consistent between fields() and fields_dict().
+        """
+
+        @attr.s
+        class C:
+            public = attr.ib()
+            _private = attr.ib()
+            explicit = attr.ib(alias="renamed")
+            _explicit_same_value = attr.ib(alias="explicit_same_value")
+
+        for container in (attr.fields(C), tuple(attr.fields_dict(C).values())):
+            by_name = {a.name: a for a in container}
+
+            assert by_name["public"].alias == "public"
+            assert by_name["public"].alias_is_default is True
+
+            assert by_name["_private"].alias == "private"
+            assert by_name["_private"].alias_is_default is True
+
+            assert by_name["explicit"].alias == "renamed"
+            assert by_name["explicit"].alias_is_default is False
+
+            # An explicit alias that happens to be equal to the default is
+            # still explicit.
+            assert (
+                by_name["_explicit_same_value"].alias == "explicit_same_value"
+            )
+            assert by_name["_explicit_same_value"].alias_is_default is False
+
+    def test_alias_is_default_inherited(self):
+        """
+        Inherited fields keep their alias_is_default state, and their order.
+        """
+
+        @attr.s
+        class Base:
+            _x = attr.ib()
+            _y = attr.ib(alias="why")
+
+        @attr.s
+        class Sub(Base):
+            _z = attr.ib()
+
+        fields = attr.fields(Sub)
+
+        assert ["_x", "_y", "_z"] == [a.name for a in fields]
+        assert ["x", "why", "z"] == [a.alias for a in fields]
+        assert [True, False, True] == [a.alias_is_default for a in fields]
+
+    def test_alias_is_default_pickle_and_copy(self):
+        """
+        alias_is_default survives pickling, copying, and evolve() of
+        Attributes unchanged.
+        """
+
+        @attr.s
+        class C:
+            _default = attr.ib()
+            _explicit = attr.ib(alias="explicit")
+
+        for a in attr.fields(C):
+            for clone in (
+                pickle.loads(pickle.dumps(a)),
+                copy.copy(a),
+                a.evolve(),
+            ):
+                assert a.alias == clone.alias
+                assert a.alias_is_default is clone.alias_is_default
+
+    def test_evolve_rename_keeps_alias_in_sync(self):
+        """
+        Attribute.evolve updates auto-generated aliases when the name
+        changes, but preserves explicitly provided ones.
+        """
+
+        @attr.s
+        class C:
+            _auto = attr.ib()
+            _explicit_same_value = attr.ib(alias="explicit_same_value")
+            _explicit = attr.ib(alias="custom")
+
+        auto, explicit_same_value, explicit = attr.fields(C)
+
+        # A default alias follows the name it was derived from.
+        renamed = auto.evolve(name="_renamed")
+        assert renamed.name == "_renamed"
+        assert renamed.alias == "renamed"
+        assert renamed.alias_is_default is True
+
+        # An explicit alias is preserved -- even one that is equal to what
+        # the default would have been.
+        renamed = explicit_same_value.evolve(name="_renamed")
+        assert renamed.name == "_renamed"
+        assert renamed.alias == "explicit_same_value"
+        assert renamed.alias_is_default is False
+
+        renamed = explicit.evolve(name="_renamed")
+        assert renamed.name == "_renamed"
+        assert renamed.alias == "custom"
+        assert renamed.alias_is_default is False
+
+        # Setting an alias explicitly marks it as such ...
+        renamed = auto.evolve(name="_renamed", alias="custom")
+        assert renamed.alias == "custom"
+        assert renamed.alias_is_default is False
+
+        # ... and resetting it to None reverts to the default handling.
+        renamed = explicit.evolve(alias=None)
+        assert renamed.alias is None
+        assert renamed.alias_is_default is True
+
+    def test_alias_is_default_not_in_repr_or_eq(self):
+        """
+        alias_is_default is derived bookkeeping: it is not part of repr,
+        equality, or hashing.
+        """
+
+        @attr.s
+        class C:
+            x = attr.ib()
+
+        (a,) = attr.fields(C)
+
+        assert "alias_is_default" not in repr(a)
+
+        same_but_explicit = a.evolve(alias="x")
+        assert same_but_explicit.alias_is_default is False
+        assert a == same_but_explicit
+        assert hash(a) == hash(same_but_explicit)
+
+    def test_init_signature_unchanged(self):
+        """
+        The generated __init__ signature is not affected by the early
+        default-alias resolution.
+        """
+
+        @attr.s
+        class C:
+            _private = attr.ib()
+            explicit = attr.ib(alias="renamed")
+
+        assert ["self", "private", "renamed"] == list(
+            inspect.signature(C.__init__).parameters
+        )
 
 
 class TestMakeOrder:

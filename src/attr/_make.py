@@ -463,6 +463,15 @@ def _transform_attrs(
 
     attrs = base_attrs + own_attrs
 
+    # Resolve default field aliases before executing the field_transformer,
+    # so it can rely on them (e.g. to derive parameter names).  Whether an
+    # alias has been resolved automatically or been explicitly provided is
+    # recorded on `Attribute.alias_is_default`.
+    for a in attrs:
+        if not a.alias:
+            # Evolve is very slow, so we hold our nose and do it dirty.
+            _OBJ_SETATTR.__get__(a)("alias", _default_init_alias_for(a.name))
+
     if field_transformer is not None:
         attrs = tuple(field_transformer(cls, attrs))
 
@@ -480,9 +489,9 @@ def _transform_attrs(
         if had_default is False and a.default is not NOTHING:
             had_default = True
 
-    # Resolve default field alias after executing field_transformer.
-    # This allows field_transformer to differentiate between explicit vs
-    # default aliases and supply their own defaults.
+    # Resolve default field aliases again after executing field_transformer:
+    # the transformer may have added new fields (or reset aliases to None)
+    # that still need their default alias.
     for a in attrs:
         if not a.alias:
             # Evolve is very slow, so we hold our nose and do it dirty.
@@ -2427,6 +2436,10 @@ class Attribute:
     - ``name`` (`str`): The name of the attribute.
     - ``alias`` (`str`): The __init__ parameter name of the attribute, after
       any explicit overrides and default private-attribute-name handling.
+    - ``alias_is_default`` (`bool`): Whether or not ``alias`` has been
+      auto-generated from ``name`` (`True`) or explicitly provided (`False`).
+      Auto-generated aliases follow the attribute name when it is changed
+      using `Attribute.evolve`; explicit ones are preserved.
     - ``inherited`` (`bool`): Whether or not that attribute has been inherited
       from a base class.
     - ``eq_key`` and ``order_key`` (`typing.Callable` or `None`): The
@@ -2452,6 +2465,7 @@ class Attribute:
         equality checks and hashing anymore.
     .. versionadded:: 21.1.0 *eq_key* and *order_key*
     .. versionadded:: 22.2.0 *alias*
+    .. versionadded:: 26.1.0 *alias_is_default*
 
     For the full version history of the fields, see `attr.ib`.
     """
@@ -2476,6 +2490,7 @@ class Attribute:
         "inherited",
         "on_setattr",
         "alias",
+        "alias_is_default",
     )
 
     def __init__(
@@ -2532,6 +2547,9 @@ class Attribute:
         bound_setattr("inherited", inherited)
         bound_setattr("on_setattr", on_setattr)
         bound_setattr("alias", alias)
+        # A missing alias means the default alias will be resolved for this
+        # attribute; anything else has been explicitly provided.
+        bound_setattr("alias_is_default", not alias)
 
     def __setattr__(self, name, value):
         raise FrozenInstanceError
@@ -2579,11 +2597,28 @@ class Attribute:
 
         It is mainly meant to be used for `transform-fields`.
 
+        If only the *name* is changed and the *alias* is an auto-generated
+        default (see *alias_is_default*), the alias is updated to match the
+        new name.  An explicitly provided *alias* is preserved as-is and
+        marks the alias as explicitly provided; passing ``alias=None``
+        reverts to a (to-be-resolved) default alias.
+
         .. versionadded:: 20.3.0
+        .. versionchanged:: 26.1.0
+            Auto-generated aliases follow *name* changes.
         """
         new = copy.copy(self)
 
         new._setattrs(changes.items())
+
+        # Keep alias and alias_is_default consistent with the changes.
+        if "alias" in changes:
+            # An explicitly passed alias is just that -- explicit.  A missing
+            # one means the default alias handling applies (again).
+            new._setattrs([("alias_is_default", not changes["alias"])])
+        elif "name" in changes and new.alias_is_default:
+            # A default alias follows the name it was derived from.
+            new._setattrs([("alias", _default_init_alias_for(new.name))])
 
         return new
 
@@ -2634,6 +2669,9 @@ _a = [
         alias=_default_init_alias_for(name),
     )
     for name in Attribute.__slots__
+    # alias_is_default is bookkeeping that is derived from alias; it must not
+    # take part in repr, equality, or hashing.
+    if name != "alias_is_default"
 ]
 
 Attribute = _add_hash(

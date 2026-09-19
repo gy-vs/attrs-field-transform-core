@@ -137,6 +137,7 @@ class Attribute(Generic[_T]):
     kw_only: bool
     on_setattr: _OnSetAttrType
     alias: str | None
+    alias_is_default: bool
 
     def evolve(self, **changes: Any) -> "Attribute[Any]": ...
 

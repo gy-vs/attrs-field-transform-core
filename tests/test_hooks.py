@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from datetime import datetime
 
 import pytest
@@ -121,6 +123,103 @@ class TestTransformHook:
             1, 2, 3
         )
 
+    def test_hook_sees_resolved_aliases(self):
+        """
+        The hook receives fields whose default aliases have already been
+        resolved (private-name handling applied), and alias_is_default
+        tells auto-generated and explicit aliases apart -- even explicit
+        ones that are equal to the default.
+        """
+        seen = {}
+
+        def hook(cls, attribs):
+            seen.update(
+                {a.name: (a.alias, a.alias_is_default) for a in attribs}
+            )
+            return attribs
+
+        @attr.s(field_transformer=hook)
+        class C:
+            public = attr.ib()
+            _private = attr.ib()
+            _explicit_same_value = attr.ib(alias="explicit_same_value")
+            explicit = attr.ib(alias="renamed")
+
+        assert {
+            "public": ("public", True),
+            "_private": ("private", True),
+            "_explicit_same_value": ("explicit_same_value", False),
+            "explicit": ("renamed", False),
+        } == seen
+
+    def test_hook_rename_updates_default_alias(self):
+        """
+        Renaming a field via evolve() inside the hook updates auto-generated
+        aliases along with the name, while explicit aliases are preserved.
+        The generated __init__ signature follows suit.
+        """
+
+        def hook(cls, attribs):
+            return [a.evolve(name=f"{a.name}_renamed") for a in attribs]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            _auto = attr.ib()
+            _explicit = attr.ib(alias="custom")
+
+        auto, explicit = attr.fields(C)
+
+        assert auto.name == "_auto_renamed"
+        assert auto.alias == "auto_renamed"
+        assert auto.alias_is_default is True
+
+        assert explicit.name == "_explicit_renamed"
+        assert explicit.alias == "custom"
+        assert explicit.alias_is_default is False
+
+        assert ["self", "auto_renamed", "custom"] == list(
+            inspect.signature(C.__init__).parameters
+        )
+        assert C(auto_renamed=1, custom=2) == C(1, 2)
+
+    def test_hook_added_field_gets_default_alias(self):
+        """
+        Fields that are added by the hook with alias=None get their default
+        alias resolved (private-name handling applied) once the hook has
+        run.
+        """
+
+        def hook(cls, attribs):
+            added = attr.Attribute(
+                name="_added",
+                default=attr.NOTHING,
+                validator=None,
+                repr=True,
+                cmp=None,
+                hash=None,
+                init=True,
+                inherited=False,
+            )
+            return [
+                *attribs,
+                added,
+                attribs[0].evolve(name="_evolved", alias=None),
+            ]
+
+        @attr.s(field_transformer=hook)
+        class C:
+            x = attr.ib()
+
+        fields = attr.fields_dict(C)
+
+        assert fields["_added"].alias == "added"
+        assert fields["_added"].alias_is_default is True
+
+        assert fields["_evolved"].alias == "evolved"
+        assert fields["_evolved"].alias_is_default is True
+
+        assert C(1, 2, 3) == C(x=1, added=2, evolved=3)
+
     def test_hook_reorder_fields(self):
         """
         It is possible to reorder fields via the hook.
@@ -178,7 +277,7 @@ class TestTransformHook:
             "eq=True, eq_key=None, order=True, order_key=None, "
             "hash=None, init=True, "
             "metadata=mappingproxy({'field_order': 1}), type='int', converter=None, "
-            "kw_only=False, inherited=False, on_setattr=None, alias=None)",
+            "kw_only=False, inherited=False, on_setattr=None, alias='x')",
         ) == e.value.args
 
     def test_hook_with_inheritance(self):
